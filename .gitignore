@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.*
+
+# Data files
+data/raw/*
+!data/raw/README.md
+
+data/processed/*
+!data/processed/README.md
+
+# Database files
+database/*.duckdb
+database/*.db
+database/*.wal
+
+# Logs and temporary files
+*.log
+.DS_Store
+
+# IDE
+.vscode/
