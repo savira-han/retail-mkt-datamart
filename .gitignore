@@ -23,9 +23,9 @@ data/processed/*
 !data/processed/README.md
 
 # Database files
-database/*.duckdb
-database/*.db
-database/*.wal
+retailmkt.db
+**/retailmkt.db
+data/warehouse/*.db
 
 # Logs and temporary files
 *.log
