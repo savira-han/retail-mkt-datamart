@@ -118,4 +118,51 @@ The `silver` schema is built in dependency order by `src/ingestion/ingest_silver
 ---
 
 ## 4. Gold Data
-*Incoming*
+### 4.1 Gold Transformation Process
+
+The `gold` schema is built via SQL scripts under `sql/gold/` reading exclusively from `silver.*` models in `retailmkt.db`:
+
+1. **Daily Store Sales Fact (`sql/gold/01_fact_sales_daily.sql`):**
+  - Joins `silver.fact_transaction` with `silver.dim_date` on `day_num` (falling back to `d.week_no` where needed) and aggregates to `(day_num, store_id)`.
+  - Preserves daily basket/household counts, additive unit/revenue/discount sums, and return/void or zero-value line counts.
+
+2. **Weekly Product & Promo Lift Fact (`sql/gold/02_fact_product_promo_weekly.sql`):**
+  - Aggregates `silver.fact_transaction` (with `silver.dim_date` for `week_no`) to `(week_no, store_id, product_id)` first so transaction lines never fan out against promotional placements.
+  - Left joins `silver.fact_store_promo_placement` on `(week_no, store_id, product_id)` and `silver.dim_product` on `product_id`, defaulting unmatched promo rows to `'0'`/`FALSE` and deriving `promo_channel` (`Display + Mailer`, `Display Only`, `Mailer Only`, `No Promo`).
+
+3. **Weekly Store Sales Aggregation (`sql/gold/03_agg_sales_weekly.sql`):**
+  - Aggregates `silver.fact_transaction` joined to `silver.dim_date` on `day_num` directly to `(week_no, store_id)` rather than summing daily distinct counts.
+  - Computes exact weekly `distinct_baskets`, `distinct_households`, `active_days_in_week`, `avg_basket_value`, and `avg_spend_per_household`.
+
+4. **Campaign Funnel Fact (`sql/gold/04_fact_campaign_funnel.sql`):**
+  - Aggregates campaign audience, coupon/product scope, redemptions, campaign-window store spend, and campaign-window eligible SKU spend in separate CTEs before left joining to `silver.dim_campaign` by `campaign_id`.
+  - Tracks four funnel stages (`targeted_households`, `active_shoppers_in_window`, `redeeming_households`, `eligible_product_buyers`), conversion percentages, and window revenue/discount metrics.
+
+5. **Audit Metadata:**
+- Every Gold table includes `_gold_created_at` (`TIMESTAMP`) recording when the table was materialized.
+
+---
+
+### 4.2 Gold Design Rationale & Key Decisions
+
+- **Why build `gold.agg_sales_weekly` directly from `silver.fact_transaction` instead of rolling up `gold.fact_sales_daily`?**
+  While additive sums (`sales_value`, `gross_sales_value`, `net_paid_amount`, `total_units`, discount sums, line counts) match across daily and weekly grains, `distinct_households` is non-additive across days. A household visiting a store twice in the same week would be double-counted if daily household counts were summed. Aggregating directly from `silver.fact_transaction` at `(week_no, store_id)` keeps weekly distinct counts and derived averages exact.
+- **Why aggregate transactions to `(week_no, store_id, product_id)` before joining `silver.fact_store_promo_placement`?**
+  Joining unaggregated line-item transactions to store-week promo rows—or joining multi-line promo observations directly to line items—can multiply rows or distort product-week velocity. Aggregating sales to `(week_no, store_id, product_id)` first and using a `LEFT JOIN` preserves one row per sold store-product-week with zero fan-out and keeps baseline (`No Promo`) weeks intact.
+- **Why use separate CTEs for audience, redemptions, window sales, and eligible product sales in `gold.fact_campaign_funnel`?**
+  Joining `bridge_campaign_audience`, `bridge_coupon_product`, `fact_coupon_redemption`, and `fact_transaction` simultaneously creates many-to-many multiplication across households, coupons, products, and baskets. Isolating each metric family in its own `GROUP BY campaign_id` CTE before joining to `silver.dim_campaign` keeps every funnel count and revenue figure exact.
+- **Why retain `targeted_households` from `silver.bridge_campaign_audience` as the funnel denominator?**
+  Not every targeted household has a row in `bronze.raw_hh_demographic` (`targeted_households_with_demo` is a subset). Using total `targeted_households` as the denominator for `visit_rate_pct` and `redemption_rate_pct` avoids artificially inflating conversion rates by dropping non-demographic households.
+- **Why defer `gold.dim_household_clv` as second priority?**
+  Prioritizing `fact_sales_daily`, `fact_product_promo_weekly`, `agg_sales_weekly`, and `fact_campaign_funnel` establishes complete coverage across daily/weekly store revenue, promotional lift, and campaign conversion first, keeping the core Gold build lean and focused.
+
+---
+
+### 4.3 Gold Inventory, Grains & Reconciliation
+
+| Gold Table | Source Silver Table(s) | Grain / Primary Key | Row Count | Key Metrics & Notes |
+|---|---|---|---|---|
+| `gold.fact_sales_daily` | `silver.fact_transaction`, `silver.dim_date` | `(day_num, store_id)` | 71,569 | Daily revenue (`sales_value` = `$8,057,463.08`), baskets, households, units, discounts, return/void & zero-value line counts |
+| `gold.fact_product_promo_weekly` | `silver.fact_transaction`, `silver.dim_date`, `silver.fact_store_promo_placement`, `silver.dim_product` | `(week_no, store_id, product_id)` | 2,370,784 | Weekly SKU sales (`$8,057,463.08`), `promo_channel` (`No Promo`, `Mailer Only`, `Display Only`, `Display + Mailer`); filter `department <> 'FUEL'` for packaged-goods unit comparisons |
+| `gold.agg_sales_weekly` | `silver.fact_transaction`, `silver.dim_date` | `(week_no, store_id)` | 13,939 | Weekly store sales (`$8,057,463.08`) across 102 weeks, exact weekly distinct baskets/households, `avg_basket_value`, `avg_spend_per_household`, `active_days_in_week` |
+| `gold.fact_campaign_funnel` | `silver.dim_campaign`, `silver.bridge_campaign_audience`, `silver.dim_household`, `silver.bridge_coupon_product`, `silver.fact_coupon_redemption`, `silver.fact_transaction` | `campaign_id` | 30 | All 30 campaigns (`TypeA`, `TypeB`, `TypeC`), 4 funnel stages, `visit_rate_pct`, `redemption_rate_pct`, window sales, eligible SKU sales |

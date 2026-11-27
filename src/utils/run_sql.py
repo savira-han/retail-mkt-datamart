@@ -4,7 +4,7 @@ import duckdb
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "retailmkt.db"
-SQL_DIR = PROJECT_ROOT / "sql" / "analytics"
+SQL_DIR = PROJECT_ROOT / "sql"
 
 
 def resolve_sql_path(arg: str) -> Path:
